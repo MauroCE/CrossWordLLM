@@ -1,7 +1,7 @@
 # Folders and other things to hide from github
 data/
 notebooks/.ipynb_checkpoints/
-crosswords/
+crosswords-venv/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
