@@ -1,5 +1,7 @@
 # Folders and other things to hide from github
 data/
+notebooks/.ipynb_checkpoints/
+crosswords/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
