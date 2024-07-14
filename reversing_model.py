@@ -4,8 +4,29 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 
+# Create the mask to identify positions between ':' and '.'
+def create_mask(idx):
+    B, T = idx.shape
+    mask = torch.zeros_like(idx, dtype=torch.bool)
+
+    for i in range(B):
+        within_segment = False
+        for t in range(T):
+            if idx[i, t] == 1:  # token index for ':'
+                within_segment = True
+            elif idx[i, t] == 0 and within_segment:  # token index for '.'
+                within_segment = False
+            mask[i, t] = within_segment
+
+    return mask
+
+
 def get_batch(split, training_data, validation_data, dev, context_size, batch_size):
-    """Generates batch of data of inputs `x` and targets `y`."""
+    """Generates batch of data of inputs `x` and targets `y`.
+
+    IMPORTANT: OUR BATCH WILL HAVE SHAPE (B, T). Therefore, there are B distinct examples, and each of them
+    has all the shifted sub-examples due to context. In our case, here T=n."""
+    # This will work both for training and validation data creation
     dataset = training_data if split == "train" else validation_data
     # Sample integers from [0, n-block_size], representing off-sets, one for each batch
     ix = torch.randint(len(dataset) - context_size, (batch_size, ))
@@ -220,13 +241,18 @@ class ReverseGPT(nn.Module):
         x = tok_emb + pos_emb  # (B, T, C)
         x = self.blocks(x)  # (B, T, C)
         _logits = self.lm_head(x)  # (B, T, vocab_size)
-
         if targets is None:
             _loss = None
         else:
             B, T, C = _logits.shape
+            # Loss must be computed only on the "ordered" sequence. This means that the target indices have to be
+            # between : and ., so we look at the context and figure out which targets are to be counted
+            mask = create_mask(idx)
+            masked_logits = _logits[mask]
+            masked_targets = targets[mask]
             _logits = _logits.view(B*T, C)
             targets = targets.view(B*T)
+            # IMPORTANTLY, WE ONLY COMPUTE THE LOSS FOR THE TOKENS BETWEEN : (1) AND . (0)
             _loss = F.cross_entropy(_logits, targets)
         return _logits, _loss
 

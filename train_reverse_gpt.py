@@ -11,22 +11,30 @@ if __name__ == "__main__":
     # Settings
     config = ReverseGPTConfig()
     config.device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+    # Remember that context must be at least 2n+1 to always have full information
+    config.context_size = 2*config.seq_len + 1
+    assert config.context_size >= 2*config.seq_len + 1, "Context size must be at least 2n+1."
 
-    max_iters = 30000
-    eval_interval = 500
+    max_iters = 10000
+    eval_interval = 100
     learning_rate = 1e-2  # This learning rate seems good
-    eval_iters = 200
+    eval_iters = 100
 
     # Device (this works for mac silicons, use cuda for nvidia gpus)
     print("DEVICE: ", config.device)
 
-    # Read divina commedia
-    with open('data/commedia.txt', 'r', encoding='utf-8') as f:
-        text = f.read()
+    # Read sequences of characters
+    with open("data/train_n10.pkl", "rb") as file:
+        train_data = pickle.load(file)
+    with open("data/test_n10.pkl", "rb") as file:
+        val_data = pickle.load(file)
+    alphabet = "abcdefghijklmnopqrstuvwxyz:."
 
     # Compute vocabulary size for divina commedia, here we work on a character level
-    vocabulary = sorted(list(set(text)))
+    vocabulary = sorted(list(set(alphabet)))
     vocab_size = len(vocabulary)
+    config.vocabulary = vocabulary
+    config.vocabulary_size = vocab_size
 
     # Mappings from characters to integers and vice versa
     str_to_int = {character: integer for integer, character in enumerate(vocabulary)}
@@ -36,16 +44,13 @@ if __name__ == "__main__":
     str2int = lambda string: [str_to_int[character] for character in string]  # string --> list(int)
     int2str = lambda int_list: ''.join([int_to_str[integer] for integer in int_list])  # list(int) --> string
 
-    # Encode divina commedia
-    data = torch.tensor(str2int(text), dtype=torch.long)
-
-    # (Naive) Train-Test split
-    n = int(0.9*len(data))
-    train_data = data[:n]  # 90% training
-    val_data = data[n:]    # 10% validation
+    # Encode the training data
+    # tokenized_training_data = [str2int(seq) for seq in train_data]
+    train_data = torch.tensor(str2int(train_data), dtype=torch.long)
+    val_data = torch.tensor(str2int(val_data), dtype=torch.long)
 
     # Instantiate model and send params to device
-    model = Model2(config)
+    model = ReverseGPT(config)
     gpt = model.to(config.device)
 
     # Adam optimizer, as usual
