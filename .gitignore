@@ -3,6 +3,8 @@ data/
 notebooks/.ipynb_checkpoints/
 crosswords-venv/
 models/
+losses/
+timings/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
