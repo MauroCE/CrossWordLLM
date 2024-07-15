@@ -16,9 +16,9 @@ if __name__ == "__main__":
     assert config.context_size >= 2*config.seq_len + 1, "Context size must be at least 2n+1."
 
     max_iters = 10000
-    eval_interval = 100
+    eval_interval = 200
     learning_rate = 1e-2  # This learning rate seems good
-    eval_iters = 100
+    eval_iters = 50
 
     # Device (this works for mac silicons, use cuda for nvidia gpus)
     print("DEVICE: ", config.device)
@@ -94,14 +94,14 @@ if __name__ == "__main__":
         optimizer.step()
 
     # Save model
-    torch.save(model.state_dict(), "models/model2_{}_{}.pth".format(eval_interval, max_iters))
-    with open("losses/model2_training_{}_{}.pkl".format(eval_interval, max_iters), "wb") as file:
+    torch.save(model.state_dict(), "models/next_token_{}_{}_new.pth".format(eval_interval, max_iters))
+    with open("losses/next_token_training_{}_{}_new.pkl".format(eval_interval, max_iters), "wb") as file:
         pickle.dump(training_losses, file)
-    with open("losses/model2_validation_{}_{}.pkl".format(eval_interval, max_iters), "wb") as file:
+    with open("losses/next_token_validation_{}_{}_new.pkl".format(eval_interval, max_iters), "wb") as file:
         pickle.dump(validation_losses, file)
 
     # Save final time
     total_time = time.time() - start_time
     print("Total time: ", total_time)
-    with open("timings/model2_{}_{}.pkl".format(eval_interval, max_iters), "wb") as file:
+    with open("timings/next_token_{}_{}_new.pkl".format(eval_interval, max_iters), "wb") as file:
         pickle.dump([total_time], file)

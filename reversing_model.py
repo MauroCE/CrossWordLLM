@@ -250,8 +250,88 @@ class ReverseGPT(nn.Module):
             mask = create_mask(idx)
             masked_logits = _logits[mask]
             masked_targets = targets[mask]
-            _logits = _logits.view(B*T, C)
-            targets = targets.view(B*T)
+            # _logits = masked_logits.view(-1, C)  # .view(B*T, C)
+            # targets = masked_targets.view(-1, C)  # .view(B*T)
+            # IMPORTANTLY, WE ONLY COMPUTE THE LOSS FOR THE TOKENS BETWEEN : (1) AND . (0)
+            _loss = F.cross_entropy(masked_logits, masked_targets)
+        return _logits, _loss
+
+    def generate(self, idx, max_new_tokens, min_new_tokens, context_size, device, idx_to_char):
+        """Here `idx` is the current context of tokens in some batch, so it is `(B, T)`. This function will continue
+        the generation one by one, for both the B and T dimensions. It keeps doing this until max_new_tokens."""
+        output = ""
+        for ii in range(max_new_tokens):
+            # We need to make sure that the idx that we feed into the model is the same size as the context
+            idx_cond = idx[:, -context_size:]  # (B, T) --> (B, block_size)
+            _logits, _loss = self(idx_cond, device=device)   # Get the predictions (calls forward(idx, targets=None))
+            _logits = _logits[:, -1, :]  # (B, T, C) --> (B, C) we focus only on the last "time step"
+            probs = F.softmax(_logits, dim=-1)  # Use Softmax to get probabilities. (B, C)
+            idx_next = torch.multinomial(probs, num_samples=1)  # Sample using the probabilities (B, 1)
+            idx = torch.cat((idx, idx_next), dim=1)  # append the sampled index to the running sequence (B, T+1)
+            output += idx_to_char[idx_next.item()]
+            if ii > min_new_tokens and output[-1] == '.':
+                # Stop at the first period after min_new_tokens
+                break
+        return output
+
+
+class MultiTokenGPT(nn.Module):
+    """We use Flash Attention (which uses an additional dropout within the attention mechanism) and GELU.
+    This model is used to reverse a sequence of characters. It uses a simple next-token predicition loss."""
+
+    def __init__(self, config):
+        """We use Flash Attention (which uses an additional dropout within the attention mechanism) and GELU."""
+        super().__init__()
+        # Grab variables that we need
+        n_emb = config.n_emb
+        num_heads = config.num_heads
+        context_size = config.context_size
+        dropout_prop = config.dropout_prop
+        vocabulary_size = config.vocabulary_size
+        num_layers = config.num_layers
+        num_multi_token = config.num_multi_token
+        # Tokens read off the logits for the next token from a lookup table
+        # Token embedding table has size (vocab_size, vocab_size)
+        # The way it works is that the input, say 24 (the first one in xb above) will take the 24th row of this
+        # embedding table.
+        self.token_embedding_table = nn.Embedding(vocabulary_size, n_emb)
+        # We now also encode the position. Each position from 0 to block_size-1 will have a corresponding embedding
+        self.position_embedding_table = nn.Embedding(context_size, n_emb)
+        # Transformer
+        self.blocks = nn.Sequential(*[
+            Block(n_emb, num_heads, context_size, dropout_prop, flash=True, activation='gelu')
+            for _ in range(num_layers)
+        ])
+        self.multi_token_heads = [Block(n_emb, num_heads, context_size, dropout_prop, flash=True, activation='gelu')
+                                  for _ in num_multi_token]
+        self.ln_f = nn.LayerNorm(n_emb)  # there should always be a layer norm at the end of the transformer
+        self.lm_head = nn.Linear(n_emb, vocabulary_size)
+
+    def forward(self, idx, device, targets=None):
+        """Forward pass. Takes `idx` and `targets` which are both `(B, T)` tensors of integers.
+        Here `B` is the batch_size and `T` should be the block/context length."""
+        B, T = idx.shape
+        # PyTorch will grab the row corresponding to the indices provided and return logits in
+        # the shape (batch, time, channel). Here batch=4, time=8, channel=65 (vocab size)
+        # The logits here are like the scores for the next token in the sequence
+        tok_emb = self.token_embedding_table(idx)  # (B, T, C=embedding_dimension), these re token embeddings now.
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T, C)
+        x = tok_emb + pos_emb  # (B, T, C)
+        x = self.blocks(x)  # (B, T, C)
+        # Now with different heads
+
+        _logits = self.lm_head(x)  # (B, T, vocab_size)
+        if targets is None:
+            _loss = None
+        else:
+            B, T, C = _logits.shape
+            # Loss must be computed only on the "ordered" sequence. This means that the target indices have to be
+            # between : and ., so we look at the context and figure out which targets are to be counted
+            mask = create_mask(idx)
+            masked_logits = _logits[mask]
+            masked_targets = targets[mask]
+            _logits = masked_logits.view(B*T, C)
+            targets = masked_targets.view(B*T)
             # IMPORTANTLY, WE ONLY COMPUTE THE LOSS FOR THE TOKENS BETWEEN : (1) AND . (0)
             _loss = F.cross_entropy(_logits, targets)
         return _logits, _loss
@@ -273,3 +353,6 @@ class ReverseGPT(nn.Module):
                 # Stop at the first period after min_new_tokens
                 break
         return output
+
+    def num_parameters(self):
+        return sum(p.numel() for p in self.parameters())
