@@ -21,31 +21,55 @@ def create_mask(idx):
     return mask
 
 
-def get_batch(split, training_data, validation_data, dev, context_size, batch_size):
+def create_mask_multi_token(idx, targets):
+    """Creates a mask for multi-token prediction."""
+    B, T, nft = targets.shape
+    mask = torch.zeros_like(targets, dtype=torch.bool)  # mask must have shape of targets
+
+    for i in range(B):
+        for t in range(T):
+            within_segment = [False] * nft  # maybe, TODO: check
+            if idx[i, t] == 1:   # token index for ':'
+                within_segment = [True] * nft
+                for j in range(1, nft):
+                    if targets[i, t, j] == 0 and within_segment[j]:
+                        within_segment[j:] = False
+            mask[i, t] = torch.tensor(within_segment, dtype=torch.bool)
+    return mask
+
+
+def get_batch(split, training_data, validation_data, dev, context_size, batch_size, multi_token=False, nft=0):
     """Generates batch of data of inputs `x` and targets `y`.
 
     IMPORTANT: OUR BATCH WILL HAVE SHAPE (B, T). Therefore, there are B distinct examples, and each of them
     has all the shifted sub-examples due to context. In our case, here T=n."""
+    if (multi_token and nft < 1) or (not multi_token and nft > 0):
+        raise ValueError("If multi_token is True, nft must be provided and vice versa.")
     # This will work both for training and validation data creation
     dataset = training_data if split == "train" else validation_data
     # Sample integers from [0, n-block_size], representing off-sets, one for each batch
     ix = torch.randint(len(dataset) - context_size, (batch_size, ))
     # Grab context and target
     _context = torch.stack([dataset[i:i+context_size] for i in ix])  # (batch_size, block_size)
-    _targets = torch.stack([dataset[i+1:i+context_size+1] for i in ix])  # (batch_size, block_size)
+    if not multi_token:
+        _targets = torch.stack([dataset[i+1:i+context_size+1] for i in ix])  # (batch_size, block_size)
+    else:
+        _targets = torch.stack([torch.stack([dataset[i+j+1:i+j+context_size+1] for j in range(nft)], dim=-1) for i in ix])  # (batch_size, context_size, n_future_tokens)
     _context, _targets = _context.to(dev), _targets.to(dev)
     return _context, _targets
 
 
 @torch.no_grad()
-def estimate_loss(gpt_model, training_data, validation_data, dev, eval_iters, context_size, batch_size):
+def estimate_loss(gpt_model, training_data, validation_data, dev, eval_iters, context_size, batch_size,
+                  multi_token=False, nft=0):
     out = {}
     gpt_model.eval()
     for split in ['train', 'val']:
         _losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split=split, training_data=training_data, validation_data=validation_data,
-                             dev=dev, context_size=context_size, batch_size=batch_size)
+                             dev=dev, context_size=context_size, batch_size=batch_size,
+                             multi_token=multi_token, nft=nft)
             _logits, _loss = gpt_model(idx=X, targets=Y, device=dev)
             _losses[k] = _loss.item()
         out[split] = _losses.mean()
@@ -274,6 +298,9 @@ class ReverseGPT(nn.Module):
                 break
         return output
 
+    def num_parameters(self):
+        return sum(p.numel() for p in self.parameters())
+
 
 class MultiTokenGPT(nn.Module):
     """We use Flash Attention (which uses an additional dropout within the attention mechanism) and GELU.
@@ -289,7 +316,9 @@ class MultiTokenGPT(nn.Module):
         dropout_prop = config.dropout_prop
         vocabulary_size = config.vocabulary_size
         num_layers = config.num_layers
-        num_multi_token = config.num_multi_token
+        self.n_future_tokens = config.n_future_tokens
+        self.return_all_heads = config.return_all_heads
+        self.vocab_size = vocabulary_size
         # Tokens read off the logits for the next token from a lookup table
         # Token embedding table has size (vocab_size, vocab_size)
         # The way it works is that the input, say 24 (the first one in xb above) will take the 24th row of this
@@ -302,8 +331,9 @@ class MultiTokenGPT(nn.Module):
             Block(n_emb, num_heads, context_size, dropout_prop, flash=True, activation='gelu')
             for _ in range(num_layers)
         ])
-        self.multi_token_heads = [Block(n_emb, num_heads, context_size, dropout_prop, flash=True, activation='gelu')
-                                  for _ in num_multi_token]
+        self.multi_token_heads = nn.ModuleList([
+            Block(n_emb, num_heads, context_size, dropout_prop, flash=True, activation='gelu')
+            for _ in range(self.n_future_tokens)])
         self.ln_f = nn.LayerNorm(n_emb)  # there should always be a layer norm at the end of the transformer
         self.lm_head = nn.Linear(n_emb, vocabulary_size)
 
@@ -317,23 +347,32 @@ class MultiTokenGPT(nn.Module):
         tok_emb = self.token_embedding_table(idx)  # (B, T, C=embedding_dimension), these re token embeddings now.
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T, C)
         x = tok_emb + pos_emb  # (B, T, C)
-        x = self.blocks(x)  # (B, T, C)
-        # Now with different heads
+        x = self.blocks(x)  # (B, T, C), shared trunk
 
-        _logits = self.lm_head(x)  # (B, T, vocab_size)
+        # Compute latent variables for each head
+        latents = []
+        n_usable_heads = self.n_future_tokens if self.return_all_heads else 1  # could speed up inference
+        for head in self.multi_token_heads[:n_usable_heads]:
+            x = head(x)
+            latents.append(x)
+        # Stack them together and use LayerNorm
+        x = torch.stack(latents, dim=-2)  # (B, T, n_future_tokens, n_emb)
+        x = self.ln_f(x)  # (B, T, n_future_tokens, n_emb)
+        # Final linear layer mapping (B, T, n_future_tokens, n_emb) -> (B, T, n_future_tokens, vocab_size)
+        _logits = self.lm_head(x)
         if targets is None:
             _loss = None
         else:
-            B, T, C = _logits.shape
-            # Loss must be computed only on the "ordered" sequence. This means that the target indices have to be
-            # between : and ., so we look at the context and figure out which targets are to be counted
-            mask = create_mask(idx)
-            masked_logits = _logits[mask]
-            masked_targets = targets[mask]
-            _logits = masked_logits.view(B*T, C)
-            targets = masked_targets.view(B*T)
-            # IMPORTANTLY, WE ONLY COMPUTE THE LOSS FOR THE TOKENS BETWEEN : (1) AND . (0)
-            _loss = F.cross_entropy(_logits, targets)
+            # Compute log-probabilities
+            log_probs = F.log_softmax(_logits, dim=-1).view(
+                B*T*n_usable_heads, self.vocab_size)  # (B*T, n_usable_heads, vocab_size)
+            extended_targets = targets.view(B*T*n_usable_heads, 1)
+            # TODO: Masking on
+            mask = create_mask_multi_token(idx, targets)  # (B, T, n_future_tokens)
+            # Compute loss
+            log_probs_true_tokens = torch.gather(
+                input=log_probs, dim=-1, index=extended_targets).squeeze(-1)  # (B, T, n_usable_heads)
+            _loss = - log_probs_true_tokens[mask.view(B*T*n_usable_heads, )].mean()  # scalar
         return _logits, _loss
 
     def generate(self, idx, max_new_tokens, min_new_tokens, context_size, device, idx_to_char):

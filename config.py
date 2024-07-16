@@ -32,12 +32,13 @@ class MultiTokenConfig:
         self.batch_size: int = 64
         self.context_size: int = 256
         self.n_emb: int = 100  # each head is 100//4 = 25 dimensional, which is smaller than standard
-        self.num_layers: int = 4
+        self.num_layers: int = 2
         self.num_heads: int = 4
         self.dropout_prop: float = 0.2  # 20% of neurons are dropped out
         self.device: str = 'mps' if torch.backends.mps.is_available() else 'cpu'
         self.vocabulary_size: int = 28
-        self.num_multi_token = 4
+        self.n_future_tokens = 2
+        self.return_all_heads = True
         self.vocabulary: tuple = (".", ":", "a", "b", "c",
                                   "d", "e", "f", "g", "h",
                                   "i", "j", "k", "l", "m",
