@@ -59,6 +59,36 @@ def get_batch(split, training_data, validation_data, dev, context_size, batch_si
     return _context, _targets
 
 
+def get_batch_new(split, training_data, validation_data, dev, context_size, batch_size, multi_token=False, nft=0):
+    """New get batch function, here I will just use a heuristic so that we don't even need to do the masking. I just
+    want each example in the batch to either:
+       1. Have a "." followed by a ":"
+       2. Have a "." followed by n non ":" characters
+       3. have n letters followed by ":"
+    """
+    if (multi_token and nft < 1) or (not multi_token and nft > 0):
+        raise ValueError("If multi_token is True, nft must be provided and vice versa.")
+    # This will work both for training and validation data creation
+    dataset = training_data if split == "train" else validation_data
+    for bix in range(batch_size):
+        # Grab an index for an example in the batch
+        ix = torch.randint(len(dataset) - context_size, (1, )).item()
+        # Check if the corresponding example is in one of the three categories
+        seq = dataset[ix:ix+context_size]
+        # check
+
+    # Sample integers from [0, n-block_size], representing off-sets, one for each batch
+    ix = torch.randint(len(dataset) - context_size, (batch_size, ))
+    # Grab context and target
+    _context = torch.stack([dataset[i:i+context_size] for i in ix])  # (batch_size, block_size)
+    if not multi_token:
+        _targets = torch.stack([dataset[i+1:i+context_size+1] for i in ix])  # (batch_size, block_size)
+    else:
+        _targets = torch.stack([torch.stack([dataset[i+j+1:i+j+context_size+1] for j in range(nft)], dim=-1) for i in ix])  # (batch_size, context_size, n_future_tokens)
+    _context, _targets = _context.to(dev), _targets.to(dev)
+    return _context, _targets
+
+
 @torch.no_grad()
 def estimate_loss(gpt_model, training_data, validation_data, dev, eval_iters, context_size, batch_size,
                   multi_token=False, nft=0):
